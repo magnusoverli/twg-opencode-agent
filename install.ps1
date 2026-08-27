@@ -91,10 +91,11 @@ function Write-AtomicText {
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
   }
   $temporary = Join-Path $parent ('.twg-installer-' + [IO.Path]::GetRandomFileName())
+  $backup = "$temporary.backup"
   try {
     [IO.File]::WriteAllText($temporary, $Content, [Text.UTF8Encoding]::new($false))
     if (Test-Path -LiteralPath $Path -PathType Leaf) {
-      [IO.File]::Replace($temporary, $Path, $null)
+      [IO.File]::Replace($temporary, $Path, $backup, $true)
     }
     else {
       [IO.File]::Move($temporary, $Path)
@@ -102,6 +103,7 @@ function Write-AtomicText {
   }
   finally {
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
   }
 }
 
@@ -266,6 +268,16 @@ function Assert-OpenCodeCompatibility {
   if ($installed -lt $minimum -or $installed -ge $maximum) {
     throw "OpenCode $installed is outside the supported range >=$minimum and <$maximum."
   }
+}
+
+function Get-FirstApplicationPath {
+  param([Parameter(Mandatory)][string] $Name)
+  $commands = @(Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue)
+  if ($commands.Count -eq 0) { return $null }
+  $path = $commands[0].Path
+  if ([string]::IsNullOrWhiteSpace($path)) { $path = $commands[0].Source }
+  if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+  return [IO.Path]::GetFullPath([string]$path)
 }
 
 function Assert-RequiredSkills {
@@ -745,16 +757,14 @@ try {
   $ActiveRoot = Get-ManagedBootstrapRoot
   if ($ActiveRoot) { $HeldLocks.Add((Acquire-UpdateLock $ActiveRoot)) }
 
-  $twg = Get-Command twg -ErrorAction SilentlyContinue
-  if ($twg) { $twgPath = $twg.Source }
-  else {
+  $twgPath = Get-FirstApplicationPath 'twg'
+  if (-not $twgPath) {
     $fallback = Join-Path $env:LOCALAPPDATA 'Programs\twg\bin\twg.exe'
     if (Test-Path -LiteralPath $fallback -PathType Leaf) { $twgPath = $fallback }
     else { throw 'TWG CLI was not found. Install TWG, then re-run this installer.' }
   }
-  $opencode = Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue
-  if ($opencode) { $opencodePath = $opencode.Source }
-  else { throw 'OpenCode executable was not found on PATH. Install OpenCode, open a new terminal, and re-run.' }
+  $opencodePath = Get-FirstApplicationPath 'opencode'
+  if (-not $opencodePath) { throw 'OpenCode executable was not found on PATH. Install OpenCode, open a new terminal, and re-run.' }
 
   $BundleRoot = $PSScriptRoot
   $SelectedManifest = $sourceManifest

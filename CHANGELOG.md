@@ -17,6 +17,7 @@ All user-visible changes to the TWG OpenCode agent are recorded here. The bundle
 
 ### Fixed
 
+- The Windows installer now handles multiple OpenCode or TWG executables on `PATH` and atomically replaces existing installer-managed files with a valid backup path.
 - Ambiguous command effects, nested `resolve` mutations, downloads, output-path aliases, timeouts, and changed executable identities now fail closed instead of bypassing approval.
 
 ## [2026.8.1] - 2026-08-26

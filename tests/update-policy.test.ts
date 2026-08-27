@@ -22,6 +22,9 @@ test("installers retain atomic activation and no-prune safety invariants", () =>
   }
   assert.match(powershellInstaller, /Publish-InstallerVersion/)
   assert.match(powershellInstaller, /Get-ManagedBootstrapRoot/)
+  assert.match(powershellInstaller, /function Get-FirstApplicationPath/)
+  assert.match(powershellInstaller, /\$commands\[0\]\.Path/)
+  assert.doesNotMatch(powershellInstaller, /Replace\(\$temporary,\s*\$Path,\s*\$null/)
   assert.match(posixInstaller, /publish_owned_version/)
   assert.match(posixInstaller, /managed_bootstrap_root/)
 })
