@@ -48,6 +48,7 @@ Select `twg` from the agent selector, then run:
 Try one of these requests:
 
 - `Show my current Jira work.`
+- `Find every NFR ticket for the TBS/Telstra customer.`
 - `Find the latest Confluence pages about the release plan.`
 - `Who owns this repository and who should review a change?`
 - `Catch me up on PROJ-123.`

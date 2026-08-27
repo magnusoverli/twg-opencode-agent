@@ -72,6 +72,7 @@ async function git(args: string[], timeout = 60_000, signal?: AbortSignal): Prom
     signal,
     env: gitEnv,
     maxBuffer: 2 * 1024 * 1024,
+    windowsHide: true,
   })
   return result.stdout.trim()
 }

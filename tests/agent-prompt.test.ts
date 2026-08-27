@@ -24,6 +24,16 @@ test("requires bounded agent output and search hydration", () => {
   assert.match(prompt, /native reads supply/)
 })
 
+test("uses structured, exhaustive Jira customer ticket discovery", () => {
+  assert.match(prompt, /project = NFR/)
+  assert.match(prompt, /not `text ~ "NFR"`/)
+  assert.match(prompt, /customer\/account custom field/)
+  assert.match(prompt, /never guess a custom-field ID or field name/)
+  assert.match(prompt, /OR semantics/)
+  assert.match(prompt, /every\s+pagination cursor/)
+  assert.match(prompt, /Never claim a complete customer result/)
+})
+
 test("preserves mutation and control-plane safety without duplicating product documentation", () => {
   assert.match(prompt, /obtain explicit user approval/)
   assert.match(prompt, /Do not run setup, login, authentication, install, update, upkeep/)

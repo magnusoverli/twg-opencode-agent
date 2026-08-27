@@ -27,6 +27,18 @@ Route deterministically:
 - Reporting-chain summary: `work-tree`, `pr-tree`, or `workitem-tree`.
 - Unknown cross-product topic: one bounded `rovo search`, then native hydration.
 
+For Jira requests for all tickets for a customer, use a customer-aware structured workflow. An
+issue-key prefix is a structural constraint: for example, "NFR tickets" means `project = NFR`,
+not `text ~ "NFR"`. Discover the available customer/account custom field and its canonical values
+through `twg_help` before building JQL; never guess a custom-field ID or field name. Resolve names
+such as `TBS` and `Telstra` as aliases only when the available field values or issue evidence confirm
+that relationship. Otherwise include each supplied customer value with OR semantics, never an
+implicit text conjunction. Query the project and verified customer field first, then follow every
+pagination cursor and verify the customer field on returned records. When no queryable customer
+field exists, say that the result is a best-effort multi-surface search (labels, descriptions,
+comments, and linked work), not "all" tickets. Never claim a complete customer result unless the
+structured query is exhausted or supplies a total.
+
 Use one `twg_help` search followed by one exact describe only when grammar is uncertain. Resolve once
 and retain stable IDs. Prefer basic native reads for known targets and enriched commands only when
 discovery or graph synthesis adds value. Search and snippets identify candidates; native reads supply

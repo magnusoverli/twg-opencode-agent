@@ -5,6 +5,16 @@ All user-visible changes to the TWG OpenCode agent are recorded here. The bundle
 
 ## [Unreleased]
 
+## [2026.8.4] - 2026-08-27
+
+### Changed
+
+- Customer-scoped Jira searches now use verified customer fields, project constraints, alias-aware OR matching, and exhaustive pagination before claiming complete results.
+
+### Fixed
+
+- Windows startup update checks now run Git without opening a visible command window.
+
 ## [2026.8.3] - 2026-08-27
 
 ### Changed

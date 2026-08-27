@@ -17,6 +17,11 @@ test("runtime update checks hand trusted newer bundles to the staged installer",
   assert.match(plugin, /Restart OpenCode to use it\./)
 })
 
+test("hides the Windows Git process used by startup update checks", () => {
+  const gitHelper = plugin.slice(plugin.indexOf("async function git("), plugin.indexOf("export function executableCandidates"))
+  assert.match(gitHelper, /windowsHide: true/)
+})
+
 test("CLI auto-update uses the fixed self-updater and requests restart only after a version change", () => {
   const cliUpdate = plugin.slice(plugin.indexOf("async function runCliAutoUpdate"), plugin.indexOf("async function acquireUpdateLock"))
   assert.match(cliUpdate, /\["update", "--yes", "--refresh-skills"\]/)
