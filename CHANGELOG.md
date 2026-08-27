@@ -8,6 +8,7 @@ All user-visible changes to the TWG OpenCode agent are recorded here. The bundle
 ### Changed
 
 - TWG CLI now updates automatically through its own updater, refreshes official skills, accepts newer releases through live command contracts, and notifies users to restart OpenCode after a version change.
+- TWG tool guidance now explicitly separates the command path from arguments and requires live contracts for unfamiliar grammar.
 - First-time bundle installs and explicitly approved runtime repairs can now bootstrap a pinned compatible TWG CLI and official OpenCode skills from Atlassian without handling authentication.
 - Removed references to unrelated OpenCode bundles so this package is documented as fully standalone.
 - The README now starts with exact public GitHub install commands for Windows and macOS/Linux plus a guided getting-started section.
@@ -20,9 +21,16 @@ All user-visible changes to the TWG OpenCode agent are recorded here. The bundle
 ### Fixed
 
 - `twg_run` and command-contract lookup now accept the documented `twg <command>` form instead of resolving it as a help command.
+- Published the command-path normalization fix in a new bundle version so installed agents can receive it.
 - TWG CLI discovery now falls back to conventional user-local install paths when a PATH launch cannot be canonicalized, including on macOS and Linux.
 - The Windows installer now handles multiple OpenCode or TWG executables on `PATH` and atomically replaces existing installer-managed files with a valid backup path.
 - Ambiguous command effects, nested `resolve` mutations, downloads, output-path aliases, timeouts, and changed executable identities now fail closed instead of bypassing approval.
+
+## [2026.8.2] - 2026-08-27
+
+### Fixed
+
+- Published the TWG command-path normalization fix so installed agents can receive it.
 
 ## [2026.8.1] - 2026-08-26
 

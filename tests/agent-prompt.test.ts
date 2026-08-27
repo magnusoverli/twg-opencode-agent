@@ -10,6 +10,13 @@ test("routes unfamiliar TWG requests through bounded skill and command discovery
   assert.match(prompt, /do not\s+rediscover unless the user's intent changes/)
 })
 
+test("defines the canonical tool command shape and requires live contracts for unfamiliar grammar", () => {
+  assert.match(prompt, /\["jira", "workitem", "get"\]/)
+  assert.match(prompt, /without `twg`/)
+  assert.match(prompt, /action:"describe"/)
+  assert.match(prompt, /only its returned contract/)
+})
+
 test("requires bounded agent output and search hydration", () => {
   assert.match(prompt, /counts/)
   assert.match(prompt, /compactInline/)

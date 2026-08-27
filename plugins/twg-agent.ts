@@ -736,7 +736,7 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     config: async (config) => registerTwgConfig(config, { runningVersion, prompt }),
     tool: {
       twg_help: {
-        description: "Search TWG help, inspect a namespace, discover an official skill reference, or return a cached compact contract for one exact executable command.",
+        description: "Search TWG help, inspect a namespace, discover an official skill reference, or return a cached compact contract. For describe, pass the lowercase command path without `twg`, for example [\"jira\", \"workitem\", \"get\"].",
         args: {
           action: z.enum(["search", "namespace", "describe", "discover-skills"]),
           terms: z.array(z.string()).max(12).default([]),
@@ -779,7 +779,7 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
         },
       } satisfies ToolDefinition,
       twg_run: {
-        description: "Run one exact TWG executable command without a shell. Contracts are cached; remote and local effects are independently approved; results and retries are structured.",
+        description: "Run one exact TWG command without a shell. Set command to its lowercase path without `twg`, for example [\"jira\", \"workitem\", \"get\"], and put keys/options in arguments. Describe unfamiliar commands first. Contracts are cached; remote and local effects are independently approved; results and retries are structured.",
         args: {
           command: z.array(z.string()).min(1).max(8),
           arguments: z.array(z.string()).max(256).default([]),
