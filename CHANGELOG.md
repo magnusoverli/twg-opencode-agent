@@ -19,6 +19,7 @@ All user-visible changes to the TWG OpenCode agent are recorded here. The bundle
 
 ### Fixed
 
+- `twg_run` and command-contract lookup now accept the documented `twg <command>` form instead of resolving it as a help command.
 - TWG CLI discovery now falls back to conventional user-local install paths when a PATH launch cannot be canonicalized, including on macOS and Linux.
 - The Windows installer now handles multiple OpenCode or TWG executables on `PATH` and atomically replaces existing installer-managed files with a valid backup path.
 - Ambiguous command effects, nested `resolve` mutations, downloads, output-path aliases, timeouts, and changed executable identities now fail closed instead of bypassing approval.

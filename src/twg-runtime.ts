@@ -127,6 +127,12 @@ export function buildTwgEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJ
   return { ...env, TWG_AGENT_DEFAULTS: env.TWG_AGENT_DEFAULTS ?? "1" }
 }
 
+export function normalizeTwgCommandPath(command: string[]): string[] {
+  const path = command[0] === "twg" ? command.slice(1) : command
+  if (path.length === 0) throw new Error("TWG command must include a command path after the executable name.")
+  return path
+}
+
 export function parseBooleanSetting(value: string | undefined, fallback: boolean): { value: boolean; error?: string } {
   if (value === undefined) return { value: fallback }
   const normalized = value.trim().toLowerCase()

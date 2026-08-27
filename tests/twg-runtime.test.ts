@@ -5,6 +5,7 @@ import {
   canRunTwgCommands,
   evaluateRuntimeCompatibility,
   evaluateTwgCliCompatibility,
+  normalizeTwgCommandPath,
   parseBooleanSetting,
   parseCompatibilityManifest,
   parseIntervalMinutes,
@@ -39,6 +40,12 @@ test("distinguishes compatible, outdated, untested, and unknown CLI versions", (
 test("enables bounded agent output without overriding an explicit host setting", () => {
   assert.equal(buildTwgEnvironment({ PATH: "test" }).TWG_AGENT_DEFAULTS, "1")
   assert.equal(buildTwgEnvironment({ TWG_AGENT_DEFAULTS: "0" }).TWG_AGENT_DEFAULTS, "0")
+})
+
+test("accepts the documented executable-prefixed command form", () => {
+  assert.deepEqual(normalizeTwgCommandPath(["twg", "jira", "workitem", "get"]), ["jira", "workitem", "get"])
+  assert.deepEqual(normalizeTwgCommandPath(["jira", "workitem", "get"]), ["jira", "workitem", "get"])
+  assert.throws(() => normalizeTwgCommandPath(["twg"]), /must include a command path/)
 })
 
 test("strictly parses updater settings", () => {

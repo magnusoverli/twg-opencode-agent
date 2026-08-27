@@ -24,6 +24,7 @@ import {
   canRunTwgCommands,
   evaluateRuntimeCompatibility,
   evaluateTwgCliCompatibility,
+  normalizeTwgCommandPath,
   parseBooleanSetting,
   parseCompatibilityManifest,
   parseIntervalMinutes,
@@ -743,7 +744,9 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
         async execute(input: { action: "search" | "namespace" | "describe" | "discover-skills"; terms: string[] }, context: ToolContext) {
           if (input.action === "describe") {
             if (input.terms.length === 0) throw new Error("describe requires an exact executable command path")
-            return JSON.stringify(compactContract((await commandMetadata(input.terms, context.abort)).metadata))
+            const command = normalizeTwgCommandPath(input.terms)
+            validateInvocation(command, [])
+            return JSON.stringify(compactContract((await commandMetadata(command, context.abort)).metadata))
           }
           if (input.action === "discover-skills" && input.terms.length === 0) throw new Error("discover-skills requires an intent")
           const resolved = await currentExecutable()
@@ -787,11 +790,12 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
           context: ToolContext,
         ) {
           if (startupError) throw new Error(`TWG agent bundle startup failed: ${startupError}`)
-          validateInvocation(input.command, input.arguments)
-          let described = await commandMetadata(input.command, context.abort)
+          const command = normalizeTwgCommandPath(input.command)
+          validateInvocation(command, input.arguments)
+          let described = await commandMetadata(command, context.abort)
           let resolved = await currentExecutable()
           if (resolved.identity !== described.identity) {
-            described = await commandMetadata(input.command, context.abort)
+            described = await commandMetadata(command, context.abort)
             resolved = await currentExecutable()
             if (resolved.identity !== described.identity) throw new Error("TWG CLI changed during command validation; retry after it stabilizes.")
           }
@@ -800,7 +804,7 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
           const effects = classifyTwgCommand(input.arguments, metadata, context.directory)
           assertKnownTwgEffects(effects, metadata)
           const executionArguments = [...input.arguments]
-          const display = displayTwgCommand(input.command, input.arguments)
+          const display = displayTwgCommand(command, input.arguments)
           if (effects.remote !== "read") {
             await context.ask({
               permission: "twg_mutation",
@@ -860,10 +864,10 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
                 throw new Error("An approved local path changed before execution; refusing to run the command.")
               }
             }
-            const result = await runProcess(resolved.executable, [...input.command, ...executionArguments], {
+            const result = await runProcess(resolved.executable, [...command, ...executionArguments], {
               cwd: context.directory,
               env: twgEnv,
-              timeoutMs: input.timeoutMs ?? defaultTimeout(input.command, input.arguments),
+              timeoutMs: input.timeoutMs ?? defaultTimeout(command, input.arguments),
               signal: context.abort,
               inlineLimit: 64 * 1024,
               artifactRoot,
