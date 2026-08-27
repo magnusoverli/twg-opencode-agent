@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "twgCli": {
+    "minimum": "1.2.5",
+    "maximumTestedExclusive": "1.3.0"
+  },
+  "helpContractVersions": [1],
+  "opencode": {
+    "minimum": "1.18.23",
+    "maximumTestedExclusive": "2.0.0"
+  },
+  "requiredFiles": [
+    "VERSION",
+    "agent/twg.md",
+    "plugins/twg-agent.ts",
+    "src/config.ts",
+    "src/twg-command.ts",
+    "src/twg-process.ts",
+    "src/twg-runtime.ts",
+    "src/update.ts",
+    "package.json",
+    "package-lock.json"
+  ],
+  "requiredSkills": ["twg"]
+}

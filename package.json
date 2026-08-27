@@ -1,0 +1,17 @@
+{
+  "name": "twg-opencode-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test \"tests/**/*.test.ts\""
+  },
+  "dependencies": {
+    "zod": "4.1.8"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.23",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
