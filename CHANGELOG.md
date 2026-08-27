@@ -5,9 +5,12 @@ All user-visible changes to the TWG OpenCode agent are recorded here. The bundle
 
 ## [Unreleased]
 
+## [2026.8.3] - 2026-08-27
+
 ### Changed
 
 - Detected trusted TWG agent bundle updates now install automatically and show a five-second restart notification.
+- Update status now distinguishes automatic bundle staging from an actual installer failure.
 - TWG CLI now updates automatically through its own updater, refreshes official skills, accepts newer releases through live command contracts, and notifies users to restart OpenCode after a version change.
 - TWG tool guidance now explicitly separates the command path from arguments and requires live contracts for unfamiliar grammar.
 - First-time bundle installs and explicitly approved runtime repairs can now bootstrap a pinned compatible TWG CLI and official OpenCode skills from Atlassian without handling authentication.
@@ -16,7 +19,7 @@ All user-visible changes to the TWG OpenCode agent are recorded here. The bundle
 - TWG execution now uses cached exact command contracts, separate help/run/artifact tools, independent remote and local approvals, structured retry outcomes, and deterministic count-first routing.
 - Large TWG results now use quota-limited session artifacts with integrity checks and bounded JSON field projection.
 - Installation now stages versioned runtime files without in-place updates, validates dependencies and official skills, smoke-tests the plugin, and atomically activates releases without pruning unrelated skills.
-- Update checks are now non-blocking and notification-only, share an ownership lock with installers, pin credential-free origins, and can require signed commits.
+- Update checks are non-blocking, share an ownership lock with installers, pin credential-free origins, and can require signed commits.
 - `/twg-version` now reports explicit CLI compatibility, skill availability, update-check state, and startup configuration errors.
 
 ### Fixed

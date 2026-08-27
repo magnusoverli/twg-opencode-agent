@@ -56,7 +56,7 @@ export function registerTwgConfig(
     template: [
       "Call `twg_agent_status` and use its `releasedChangelog` field.",
       "Show the latest 2-3 released versions and never include the Unreleased section.",
-      "Use concise plain text grouped by version. If status reports a newer available version, say to rerun the installer.",
+      "Use concise plain text grouped by version. If `update.error` is present, say automatic bundle staging failed and the installer can be rerun. If a newer version is available without an error, say it is being staged automatically and a restart notification will follow.",
     ].join("\n"),
   }
 }

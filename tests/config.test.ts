@@ -38,6 +38,8 @@ test("registers version and changelog commands", () => {
   assert.doesNotMatch(config.command["twg-version"].template, /\$ARGUMENTS/)
   assert.equal(config.command["twg-changelog"].agent, "twg")
   assert.match(config.command["twg-changelog"].template, /releasedChangelog/)
+  assert.match(config.command["twg-changelog"].template, /automatic bundle staging failed/)
+  assert.match(config.command["twg-changelog"].template, /being staged automatically/)
   assert.doesNotMatch(config.command["twg-changelog"].template, /\$ARGUMENTS/)
 })
 
