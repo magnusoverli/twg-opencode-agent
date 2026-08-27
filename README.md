@@ -11,8 +11,9 @@ store credentials.
 
 ## Quick start (Windows)
 
-**Before you start:** install Git, Node.js/npm, OpenCode, and the TWG CLI. You also need TWG access to
-your intended Atlassian tenant.
+**Before you start:** install Git, Node.js/npm, and OpenCode. You also need TWG access to your intended
+Atlassian tenant. If TWG CLI is missing, the installer bootstraps a compatible version from Atlassian's
+official public installer without starting login.
 
 ### 1. Install
 
@@ -57,8 +58,9 @@ Use `/twg-changelog` to see recent agent changes.
 
 ## Quick start (macOS / Linux)
 
-**Before you start:** install Git, Node.js/npm, OpenCode, and the TWG CLI. You also need TWG access to
-your intended Atlassian tenant.
+**Before you start:** install Git, Node.js/npm, and OpenCode. You also need TWG access to your intended
+Atlassian tenant. If TWG CLI is missing, the installer bootstraps a compatible version from Atlassian's
+official public installer without starting login.
 
 ### 1. Install
 
@@ -128,14 +130,15 @@ unchanged.
 ## Requirements
 
 - OpenCode `>=1.18.23` and `<2.0.0`
-- TWG CLI `>=1.2.5` and `<1.3.0`
+- TWG CLI `>=1.2.5`; the manifest records a tested range, while newer releases use their live command contracts
 - Git with access to GitHub
 - Node.js and npm
 - Access to the intended Atlassian tenant through the TWG CLI
 
-The installer validates these versions, installs official TWG skills without pruning unrelated
-skills, verifies that the root `twg` skill is visible to OpenCode, and smoke-tests the plugin before
-activation.
+The installer validates these versions, bootstraps pinned TWG CLI `1.2.6` from Atlassian when missing,
+installs official TWG skills without pruning unrelated skills, verifies that the root `twg` skill is
+visible to OpenCode, and smoke-tests the plugin before activation. CLI bootstrap does not authenticate;
+run `twg login` in a terminal when needed.
 
 ## How it works
 
@@ -144,6 +147,8 @@ activation.
 - A small bootstrap plugin under the global OpenCode `plugins/` directory imports the active version.
 - The plugin registers the selectable `twg` primary agent, guarded TWG tools, `/twg-version`, and
   `/twg-changelog`.
+- `twg_cli_install` can repair a missing CLI from Atlassian's fixed public installer after explicit
+  approval; it skips authentication and verifies the installed version and OpenCode skills.
 - Official skills remain managed by `twg skills install`; this repository does not redistribute them.
 - Exact command contracts come from versioned JSON returned by
   `twg help describe <command> -o json`, so the agent does not rely on a drifting command catalog.
@@ -162,11 +167,24 @@ product, the agent reads current state, describes the exact target and effect, o
 approval, executes the typed command, and verifies the result.
 
 Local reads and writes require a separate approval for the canonical paths involved. Setup, login,
-credential, update, and administrative configuration commands require an explicit request. The agent
+credential, manual update, and administrative configuration commands require an explicit request. The agent
 cannot invoke TWG through a shell: `twg_run` validates exact live command metadata and fails closed
 when command arguments or effects cannot be proven safe. Other host tools are denied for this agent.
+CLI installation uses a separate approval and a fixed Atlassian HTTPS source; the model cannot supply
+an installer URL, command, destination, or version.
 
 ## Updates
+
+TWG CLI auto-update is enabled by default. Five seconds after startup and every six hours, the plugin
+runs TWG's own updater and refreshes official skills. When the CLI version changes, OpenCode displays
+a notification that the release was installed and asks for a restart so the refreshed skills load.
+Newer CLI versions continue to use exact live command contracts; the manifest's maximum remains an
+advisory tested boundary rather than blocking the new release.
+
+CLI update settings:
+
+- `TWG_AGENT_CLI_AUTO_UPDATE=false` disables automatic TWG CLI updates.
+- `TWG_AGENT_CLI_UPDATE_INTERVAL_MINUTES=<n>` changes the interval; minimum 1 minute.
 
 On startup and every 15 minutes, the plugin performs a locked, non-blocking check of its tracked
 branch. It may fetch Git metadata, but it never changes tracked runtime files or activates an update.
@@ -176,7 +194,7 @@ To install an available update, rerun the same installer command from **Quick st
 OpenCode. The installer validates, stages, smoke-tests, and atomically activates the new version while
 preserving the prior active version on failure.
 
-Update-check settings:
+Agent bundle update-check settings:
 
 - `TWG_AGENT_UPDATE_CHECK=false` disables update checks.
 - `TWG_AGENT_UPDATE_CHECK_INTERVAL_MINUTES=<n>` changes the interval; minimum 1 minute.

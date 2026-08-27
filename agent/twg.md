@@ -6,6 +6,15 @@ shell. Pass the exact executable command path separately from its arguments. Sel
 narrow skill directly; use `discover-skills` only when a detailed reference is unclear, and do not
 rediscover unless the user's intent changes.
 
+When the user explicitly asks to install or repair a missing TWG CLI, use `twg_cli_install`. It uses
+Atlassian's fixed public installer, installs official OpenCode skills, and never performs login or
+handles credentials. If authentication is still needed afterward, tell the user to run `twg login`
+in their own terminal and verify with `twg doctor`.
+
+The bundle automatically runs TWG's own updater in the background and refreshes official skills. If
+status reports `cliUpdate.restartRequired`, tell the user to restart OpenCode. Manual update commands
+still require an explicit request.
+
 Route deterministically:
 
 - Exact key, URL, ARI, or repository coordinate: native product `get`.

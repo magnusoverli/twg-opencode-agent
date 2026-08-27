@@ -1,10 +1,38 @@
 import { z } from "zod"
 
+type ParsedVersion = [major: number, minor: number, patch: number]
+
+function parseVersion(value: string): ParsedVersion | null {
+  const match = value.match(/(?:^|[^0-9A-Za-z.+-])(\d+)\.(\d+)\.(\d+)(?![0-9A-Za-z.+-])/)
+  if (!match) return null
+  return [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+
+function compareVersions(left: ParsedVersion, right: ParsedVersion): number {
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index]
+  }
+  return 0
+}
+
 const semanticVersion = z.string().regex(/^\d+\.\d+\.\d+$/)
+const twgCliCompatibilitySchema = z.object({
+  minimum: semanticVersion,
+  maximumTestedExclusive: semanticVersion,
+  installVersion: semanticVersion,
+}).superRefine((value, context) => {
+  const minimum = parseVersion(value.minimum)!
+  const maximum = parseVersion(value.maximumTestedExclusive)!
+  const install = parseVersion(value.installVersion)!
+  if (compareVersions(minimum, maximum) >= 0) context.addIssue({ code: "custom", message: "TWG CLI compatibility range is empty or inverted." })
+  if (compareVersions(install, minimum) < 0 || compareVersions(install, maximum) >= 0) {
+    context.addIssue({ code: "custom", message: "TWG CLI installVersion must be inside the compatible range." })
+  }
+})
 
 export const compatibilityManifestSchema = z.object({
   schemaVersion: z.literal(1),
-  twgCli: z.object({ minimum: semanticVersion, maximumTestedExclusive: semanticVersion }),
+  twgCli: twgCliCompatibilitySchema,
   helpContractVersions: z.array(z.number().int().positive()).min(1),
   opencode: z.object({ minimum: semanticVersion, maximumTestedExclusive: semanticVersion }),
   requiredFiles: z.array(z.string().min(1)).min(1),
@@ -16,8 +44,6 @@ export type CompatibilityManifest = z.infer<typeof compatibilityManifestSchema>
 export function parseCompatibilityManifest(value: unknown): CompatibilityManifest {
   return compatibilityManifestSchema.parse(value)
 }
-
-type ParsedVersion = [major: number, minor: number, patch: number]
 
 export type TwgCliCompatibility = {
   status: "compatible" | "outdated" | "untested" | "unknown"
@@ -35,17 +61,8 @@ export type RuntimeCompatibility = {
   message: string
 }
 
-function parseVersion(value: string): ParsedVersion | null {
-  const match = value.match(/(?:^|[^0-9])(\d+)\.(\d+)\.(\d+)(?![0-9A-Za-z+-])/)
-  if (!match) return null
-  return [Number(match[1]), Number(match[2]), Number(match[3])]
-}
-
-function compareVersions(left: ParsedVersion, right: ParsedVersion): number {
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) return left[index] - right[index]
-  }
-  return 0
+export function canRunTwgCommands(compatibility: TwgCliCompatibility): boolean {
+  return compatibility.status === "compatible" || compatibility.status === "untested"
 }
 
 export function evaluateTwgCliCompatibility(

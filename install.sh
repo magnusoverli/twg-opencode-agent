@@ -35,6 +35,7 @@ managed_marker='// Managed by twg-opencode-agent installer.'
 supported_help_contract=1
 selected_minimum=""
 selected_maximum=""
+selected_install_version=""
 selected_opencode_minimum=""
 selected_opencode_maximum=""
 required_skills=()
@@ -137,8 +138,8 @@ try {
 }
 const semver = /^\d+\.\d+\.\d+$/
 if (manifest.schemaVersion !== 1) throw new Error(`unsupported compatibility schemaVersion ${manifest.schemaVersion}`)
-if (!manifest.twgCli || !semver.test(manifest.twgCli.minimum) || !semver.test(manifest.twgCli.maximumTestedExclusive)) {
-  throw new Error("compatibility.json must declare semantic TWG CLI minimum and maximumTestedExclusive versions")
+if (!manifest.twgCli || !semver.test(manifest.twgCli.minimum) || !semver.test(manifest.twgCli.maximumTestedExclusive) || !semver.test(manifest.twgCli.installVersion)) {
+  throw new Error("compatibility.json must declare semantic TWG CLI minimum, maximumTestedExclusive, and installVersion versions")
 }
 const parts = value => value.split(".").map(Number)
 const compare = (a, b) => {
@@ -148,6 +149,9 @@ const compare = (a, b) => {
 }
 if (compare(manifest.twgCli.minimum, manifest.twgCli.maximumTestedExclusive) >= 0) {
   throw new Error("compatibility.json has an empty or inverted TWG CLI version range")
+}
+if (compare(manifest.twgCli.installVersion, manifest.twgCli.minimum) < 0 || compare(manifest.twgCli.installVersion, manifest.twgCli.maximumTestedExclusive) >= 0) {
+  throw new Error("compatibility.json twgCli.installVersion must be inside the compatible range")
 }
 if (!manifest.opencode || !semver.test(manifest.opencode.minimum) || !semver.test(manifest.opencode.maximumTestedExclusive)) {
   throw new Error("compatibility.json must declare semantic OpenCode minimum and maximumTestedExclusive versions")
@@ -183,6 +187,7 @@ for (const skill of manifest.requiredSkills) {
 }
 console.log(`minimum\t${manifest.twgCli.minimum}`)
 console.log(`maximum\t${manifest.twgCli.maximumTestedExclusive}`)
+console.log(`installVersion\t${manifest.twgCli.installVersion}`)
 console.log(`opencodeMinimum\t${manifest.opencode.minimum}`)
 console.log(`opencodeMaximum\t${manifest.opencode.maximumTestedExclusive}`)
 for (const skill of manifest.requiredSkills) console.log(`skill\t${skill}`)
@@ -192,6 +197,7 @@ NODE
   fi
   selected_minimum=""
   selected_maximum=""
+  selected_install_version=""
   selected_opencode_minimum=""
   selected_opencode_maximum=""
   required_skills=()
@@ -199,17 +205,18 @@ NODE
     case "$kind" in
       minimum) selected_minimum="$value" ;;
       maximum) selected_maximum="$value" ;;
+      installVersion) selected_install_version="$value" ;;
       opencodeMinimum) selected_opencode_minimum="$value" ;;
       opencodeMaximum) selected_opencode_maximum="$value" ;;
       skill) required_skills+=("$value") ;;
       *) die "Unexpected compatibility parser output." ;;
     esac
   done <<< "$output"
-  [[ -n "$selected_minimum" && -n "$selected_maximum" && -n "$selected_opencode_minimum" && -n "$selected_opencode_maximum" && ${#required_skills[@]} -gt 0 ]] || die "Incomplete compatibility manifest in $root."
+  [[ -n "$selected_minimum" && -n "$selected_maximum" && -n "$selected_install_version" && -n "$selected_opencode_minimum" && -n "$selected_opencode_maximum" && ${#required_skills[@]} -gt 0 ]] || die "Incomplete compatibility manifest in $root."
 }
 
 version_in_range() {
-  node - "$1" "$2" "$3" <<'NODE'
+  node - "$1" "$2" "${3-}" <<'NODE'
 const [installed, minimum, maximum] = process.argv.slice(2)
 const parts = value => value.split(".").map(Number)
 const compare = (leftValue, rightValue) => {
@@ -217,8 +224,67 @@ const compare = (leftValue, rightValue) => {
   for (let index = 0; index < 3; index++) if (left[index] !== right[index]) return left[index] - right[index]
   return 0
 }
-if (compare(installed, minimum) < 0 || compare(installed, maximum) >= 0) process.exit(1)
+if (compare(installed, minimum) < 0 || (maximum && compare(installed, maximum) >= 0)) process.exit(1)
 NODE
+}
+
+install_official_twg_cli() {
+  local version="$1" base_url installer installer_bytes curl_bin
+  base_url='https://teamwork-graph.atlassian.com/cli'
+  if [[ -x /usr/bin/curl ]]; then curl_bin=/usr/bin/curl
+  elif [[ -x /bin/curl ]]; then curl_bin=/bin/curl
+  else die "System curl is required to bootstrap TWG CLI from the official Atlassian installer."
+  fi
+  installer="$(mktemp "${TMPDIR:-/tmp}/twg-install.XXXXXX")"
+  echo "TWG CLI was not found; installing supported version $version from $base_url/install ..."
+  if ! "$curl_bin" -fsS --max-redirs 0 --max-filesize 1048576 --proto '=https' --tlsv1.2 "$base_url/install" -o "$installer"; then
+    rm -f "$installer"
+    die "Could not download the official TWG CLI installer."
+  fi
+  installer_bytes="$(wc -c < "$installer" | tr -d '[:space:]')"
+  if [[ ! "$installer_bytes" =~ ^[0-9]+$ || "$installer_bytes" -le 0 || "$installer_bytes" -gt 1048576 ]] ||
+    ! grep -Fq '#!/usr/bin/env bash' "$installer" ||
+    ! grep -Fq 'SHA256SUMS-' "$installer" ||
+    ! grep -Fq -- '--skip-login' "$installer" ||
+    ! grep -Fq -- '--skip-skills' "$installer" ||
+    ! grep -Fq 'setup finalize' "$installer"; then
+    rm -f "$installer"
+    die "Official TWG installer response did not match the expected structure."
+  fi
+  if ! /bin/bash -n "$installer"; then
+    rm -f "$installer"
+    die "The official TWG CLI installer failed syntax validation."
+  fi
+  if ! (
+    unset TWG_TOKEN TWG_USER TWG_INSTALLER_PAT
+    export DO_NOT_TRACK=1 PATH='/usr/bin:/bin:/usr/sbin:/sbin' TWG_INSTALL_BASE_URL="$base_url" TWG_VERSION="$version"
+    /bin/bash "$installer" --version "$version" --skip-login --skip-skills --yes --plugin opencode
+  ); then
+    rm -f "$installer"
+    die "The official TWG CLI installer failed."
+  fi
+  rm -f "$installer"
+}
+
+assert_unlinked_path_components() {
+  local cursor="$1" parent
+  while true; do
+    [[ ! -L "$cursor" ]] || die "TWG installation path contains a symbolic link: $cursor"
+    parent="$(dirname "$cursor")"
+    [[ "$parent" != "$cursor" ]] || break
+    cursor="$parent"
+  done
+}
+
+assert_safe_skill_destinations() {
+  local root skill
+  for root in "$HOME/.agents/skills" "$config_dir/skills" "$HOME/.claude/skills"; do
+    assert_unlinked_path_components "$root"
+    for skill in "${required_skills[@]}"; do
+      assert_unlinked_path_components "$root/$skill"
+      assert_unlinked_path_components "$root/$skill/SKILL.md"
+    done
+  done
 }
 
 verify_required_skills() {
@@ -714,8 +780,9 @@ if twg_candidate="$(command -v twg)"; then
 elif [[ -x "${HOME}/.local/bin/twg" ]]; then
   twg_bin="${HOME}/.local/bin/twg"
 else
-  die "TWG CLI was not found. Install TWG, then re-run."
+  twg_bin=""
 fi
+twg_bootstrapped=false
 if opencode_candidate="$(command -v opencode)"; then
   opencode_bin="$opencode_candidate"
 else
@@ -765,23 +832,38 @@ fi
 printf '%s\n' "$opencode_version_output"
 if [[ "$opencode_version_output" =~ (^|[^0-9])([0-9]+\.[0-9]+\.[0-9]+)[-+] ]]; then
   die "OpenCode must report a release semantic version without prerelease or build metadata."
-elif [[ "$opencode_version_output" =~ (^|[^0-9])([0-9]+\.[0-9]+\.[0-9]+)($|[^0-9]) ]]; then
+elif [[ "$opencode_version_output" =~ (^|[^0-9A-Za-z.+-])([0-9]+\.[0-9]+\.[0-9]+)($|[^0-9A-Za-z.+-]) ]]; then
   opencode_version="${BASH_REMATCH[2]}"
 else
   die "Could not determine the OpenCode semantic version."
 fi
 version_in_range "$opencode_version" "$selected_opencode_minimum" "$selected_opencode_maximum" || die "OpenCode $opencode_version is outside the supported range >=$selected_opencode_minimum and <$selected_opencode_maximum."
 
+if [[ -z "$twg_bin" ]]; then
+  assert_unlinked_path_components "${HOME}/.local/bin/twg"
+  install_official_twg_cli "$selected_install_version"
+  twg_bootstrapped=true
+  twg_bin="${HOME}/.local/bin/twg"
+  [[ -x "$twg_bin" ]] || die "The official TWG installer completed without creating the expected executable."
+fi
+
 twg_version_output="$("$twg_bin" --version)"
 printf '%s\n' "$twg_version_output"
 if [[ "$twg_version_output" =~ (^|[^0-9])([0-9]+\.[0-9]+\.[0-9]+)[-+] ]]; then
   die "TWG CLI must report a release semantic version without prerelease or build metadata."
-elif [[ "$twg_version_output" =~ (^|[^0-9])([0-9]+\.[0-9]+\.[0-9]+)($|[^0-9]) ]]; then
+elif [[ "$twg_version_output" =~ (^|[^0-9A-Za-z.+-])([0-9]+\.[0-9]+\.[0-9]+)($|[^0-9A-Za-z.+-]) ]]; then
   twg_version="${BASH_REMATCH[2]}"
 else
   die "Could not determine the TWG CLI semantic version."
 fi
-version_in_range "$twg_version" "$selected_minimum" "$selected_maximum" || die "TWG CLI $twg_version is outside the supported range >=$selected_minimum and <$selected_maximum."
+version_in_range "$twg_version" "$selected_minimum" || die "TWG CLI $twg_version is older than required version $selected_minimum."
+if ! version_in_range "$twg_version" "$selected_minimum" "$selected_maximum"; then
+  echo "Warning: TWG CLI $twg_version is newer than the tested range below $selected_maximum; continuing with live command contracts." >&2
+fi
+if $twg_bootstrapped && [[ "$twg_version" != "$selected_install_version" ]]; then
+  die "Official installer produced TWG CLI $twg_version instead of pinned version $selected_install_version."
+fi
+assert_safe_skill_destinations
 
 if ! $skip_twg_skills; then
   echo "Installing official TWG skills without pruning custom twg-* directories ..."

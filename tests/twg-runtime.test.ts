@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import {
   buildTwgEnvironment,
+  canRunTwgCommands,
   evaluateRuntimeCompatibility,
   evaluateTwgCliCompatibility,
   parseBooleanSetting,
@@ -11,7 +12,7 @@ import {
 
 const manifest = parseCompatibilityManifest({
   schemaVersion: 1,
-  twgCli: { minimum: "1.2.5", maximumTestedExclusive: "1.3.0" },
+  twgCli: { minimum: "1.2.5", maximumTestedExclusive: "1.3.0", installVersion: "1.2.6" },
   helpContractVersions: [1],
   opencode: { minimum: "1.18.23", maximumTestedExclusive: "2.0.0" },
   requiredFiles: ["VERSION"],
@@ -28,7 +29,11 @@ test("distinguishes compatible, outdated, untested, and unknown CLI versions", (
   assert.equal(evaluateTwgCliCompatibility("1.2.6-beta", manifest).status, "unknown")
   assert.equal(evaluateTwgCliCompatibility("1.2.4", manifest).status, "outdated")
   assert.equal(evaluateTwgCliCompatibility("1.3.0", manifest).status, "untested")
+  assert.equal(evaluateTwgCliCompatibility("1.2.6.7", manifest).status, "unknown")
   assert.equal(evaluateTwgCliCompatibility("development", manifest).status, "unknown")
+  assert.equal(canRunTwgCommands(evaluateTwgCliCompatibility("1.2.6", manifest)), true)
+  assert.equal(canRunTwgCommands(evaluateTwgCliCompatibility("1.3.0", manifest)), true)
+  assert.equal(canRunTwgCommands(evaluateTwgCliCompatibility("1.2.4", manifest)), false)
 })
 
 test("enables bounded agent output without overriding an explicit host setting", () => {
@@ -45,4 +50,15 @@ test("strictly parses updater settings", () => {
 
 test("validates compatibility manifests", () => {
   assert.throws(() => parseCompatibilityManifest({ schemaVersion: 2 }), /Invalid input/)
+  assert.throws(
+    () => parseCompatibilityManifest({
+      schemaVersion: 1,
+      twgCli: { minimum: "1.2.5", maximumTestedExclusive: "1.3.0", installVersion: "1.3.0" },
+      helpContractVersions: [1],
+      opencode: { minimum: "1.18.23", maximumTestedExclusive: "2.0.0" },
+      requiredFiles: ["VERSION"],
+      requiredSkills: ["twg"],
+    }),
+    /installVersion/,
+  )
 })

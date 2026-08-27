@@ -21,4 +21,7 @@ test("preserves mutation and control-plane safety without duplicating product do
   assert.match(prompt, /obtain explicit user approval/)
   assert.match(prompt, /Do not run setup, login, authentication, install, update, upkeep/)
   assert.match(prompt, /Local file access/)
+  assert.match(prompt, /twg_cli_install/)
+  assert.match(prompt, /never performs login/)
+  assert.match(prompt, /automatically runs TWG's own updater/)
 })

@@ -173,13 +173,19 @@ function Read-CompatibilityManifest {
   if (-not $manifest.twgCli -or
       $manifest.twgCli.minimum -isnot [string] -or
       $manifest.twgCli.maximumTestedExclusive -isnot [string] -or
+      $manifest.twgCli.installVersion -isnot [string] -or
       $manifest.twgCli.minimum -notmatch '^\d+\.\d+\.\d+$' -or
-      $manifest.twgCli.maximumTestedExclusive -notmatch '^\d+\.\d+\.\d+$') {
-    throw 'compatibility.json must declare semantic twgCli.minimum and twgCli.maximumTestedExclusive versions.'
+      $manifest.twgCli.maximumTestedExclusive -notmatch '^\d+\.\d+\.\d+$' -or
+      $manifest.twgCli.installVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw 'compatibility.json must declare semantic twgCli.minimum, maximumTestedExclusive, and installVersion versions.'
   }
   $minimum = [version]$manifest.twgCli.minimum
   $maximum = [version]$manifest.twgCli.maximumTestedExclusive
+  $installVersion = [version]$manifest.twgCli.installVersion
   if ($minimum -ge $maximum) { throw 'compatibility.json has an empty or inverted TWG CLI version range.' }
+  if ($installVersion -lt $minimum -or $installVersion -ge $maximum) {
+    throw 'compatibility.json twgCli.installVersion must be inside the compatible range.'
+  }
   if (-not $manifest.opencode -or
       $manifest.opencode.minimum -isnot [string] -or
       $manifest.opencode.maximumTestedExclusive -isnot [string] -or
@@ -238,14 +244,13 @@ function Assert-CliCompatibility {
   if ($versionText -match '(?:^|[^0-9])\d+\.\d+\.\d+[-+]') {
     throw 'TWG CLI must report a release semantic version without prerelease or build metadata.'
   }
-  $match = [regex]::Match($versionText, '(?:^|[^0-9])(\d+\.\d+\.\d+)(?:$|[^0-9])')
+  $match = [regex]::Match($versionText, '(?:^|[^0-9A-Za-z.+-])(\d+\.\d+\.\d+)(?:$|[^0-9A-Za-z.+-])')
   if (-not $match.Success) { throw 'Could not determine the TWG CLI semantic version.' }
   $installed = [version]$match.Groups[1].Value
   $minimum = [version]$Manifest.twgCli.minimum
   $maximum = [version]$Manifest.twgCli.maximumTestedExclusive
-  if ($installed -lt $minimum -or $installed -ge $maximum) {
-    throw "TWG CLI $installed is outside the supported range >=$minimum and <$maximum."
-  }
+  if ($installed -lt $minimum) { throw "TWG CLI $installed is older than required version $minimum." }
+  if ($installed -ge $maximum) { Write-Warning "TWG CLI $installed is newer than the tested range below $maximum; continuing with live command contracts." }
 }
 
 function Assert-OpenCodeCompatibility {
@@ -260,7 +265,7 @@ function Assert-OpenCodeCompatibility {
   if ($versionText -match '(?:^|[^0-9])\d+\.\d+\.\d+[-+]') {
     throw 'OpenCode must report a release semantic version without prerelease or build metadata.'
   }
-  $match = [regex]::Match($versionText, '(?:^|[^0-9])(\d+\.\d+\.\d+)(?:$|[^0-9])')
+  $match = [regex]::Match($versionText, '(?:^|[^0-9A-Za-z.+-])(\d+\.\d+\.\d+)(?:$|[^0-9A-Za-z.+-])')
   if (-not $match.Success) { throw 'Could not determine the OpenCode semantic version.' }
   $installed = [version]$match.Groups[1].Value
   $minimum = [version]$Manifest.opencode.minimum
@@ -278,6 +283,91 @@ function Get-FirstApplicationPath {
   if ([string]::IsNullOrWhiteSpace($path)) { $path = $commands[0].Source }
   if ([string]::IsNullOrWhiteSpace($path)) { return $null }
   return [IO.Path]::GetFullPath([string]$path)
+}
+
+function Install-OfficialTwgCli {
+  param([Parameter(Mandatory)][string] $Version)
+  $baseUrl = 'https://teamwork-graph.atlassian.com/cli'
+  $installerPath = Join-Path ([IO.Path]::GetTempPath()) ("twg-install-$PID-$([Guid]::NewGuid().ToString('N')).ps1")
+  $priorBaseUrl = $env:TWG_INSTALL_BASE_URL
+  $priorVersion = $env:TWG_VERSION
+  $priorDoNotTrack = $env:DO_NOT_TRACK
+  $priorToken = $env:TWG_TOKEN
+  $priorUser = $env:TWG_USER
+  $priorPat = $env:TWG_INSTALLER_PAT
+  $priorPath = $env:PATH
+  try {
+    $curlPath = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path -LiteralPath $curlPath -PathType Leaf)) { throw 'System curl.exe is required to bootstrap TWG CLI from the official Atlassian installer.' }
+    Write-Host "TWG CLI was not found; installing supported version $Version from $baseUrl/install.ps1 ..."
+    Invoke-Checked $curlPath @('-fsS', '--max-redirs', '0', '--max-filesize', '1048576', '--proto', '=https', '--tlsv1.2', "$baseUrl/install.ps1", '-o', $installerPath)
+    $installerInfo = Get-Item -LiteralPath $installerPath
+    if ($installerInfo.Length -le 0 -or $installerInfo.Length -gt 1MB) { throw 'Official TWG installer has an invalid size.' }
+    $installerText = [IO.File]::ReadAllText($installerPath)
+    foreach ($marker in @('Param(', 'SHA256SUMS-', 'SkipLogin', 'SkipSkills', 'setup finalize')) {
+      if (-not $installerText.Contains($marker)) { throw 'Official TWG installer response did not match the expected structure.' }
+    }
+    $env:TWG_INSTALL_BASE_URL = $baseUrl
+    $env:TWG_VERSION = $Version
+    $env:DO_NOT_TRACK = '1'
+    $env:PATH = @(
+      (Join-Path $env:SystemRoot 'System32'),
+      $env:SystemRoot,
+      (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0')
+    ) -join ';'
+    Remove-Item -Path @('Env:TWG_TOKEN', 'Env:TWG_USER', 'Env:TWG_INSTALLER_PAT') -ErrorAction SilentlyContinue
+    $powershellPath = Join-Path $PSHOME 'powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) { throw 'Could not resolve the current Windows PowerShell executable.' }
+    Invoke-Checked $powershellPath @(
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $installerPath,
+      '-Version', $Version, '-SkipLogin', '-SkipSkills', '-Yes', '-Plugin', 'opencode'
+    )
+  }
+  finally {
+    if ($null -eq $priorBaseUrl) { Remove-Item Env:TWG_INSTALL_BASE_URL -ErrorAction SilentlyContinue }
+    else { $env:TWG_INSTALL_BASE_URL = $priorBaseUrl }
+    if ($null -eq $priorVersion) { Remove-Item Env:TWG_VERSION -ErrorAction SilentlyContinue }
+    else { $env:TWG_VERSION = $priorVersion }
+    if ($null -eq $priorDoNotTrack) { Remove-Item Env:DO_NOT_TRACK -ErrorAction SilentlyContinue }
+    else { $env:DO_NOT_TRACK = $priorDoNotTrack }
+    if ($null -eq $priorToken) { Remove-Item Env:TWG_TOKEN -ErrorAction SilentlyContinue } else { $env:TWG_TOKEN = $priorToken }
+    if ($null -eq $priorUser) { Remove-Item Env:TWG_USER -ErrorAction SilentlyContinue } else { $env:TWG_USER = $priorUser }
+    if ($null -eq $priorPat) { Remove-Item Env:TWG_INSTALLER_PAT -ErrorAction SilentlyContinue } else { $env:TWG_INSTALLER_PAT = $priorPat }
+    $env:PATH = $priorPath
+    Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Assert-UnlinkedPathComponents {
+  param([Parameter(Mandatory)][string] $Path)
+  $cursor = [IO.Path]::GetFullPath($Path)
+  while ($true) {
+    if (Test-Path -LiteralPath $cursor) {
+      $item = Get-Item -Force -LiteralPath $cursor
+      if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "TWG installation path contains a reparse point: $cursor"
+      }
+    }
+    $parent = [IO.Path]::GetDirectoryName($cursor)
+    if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) { break }
+    $cursor = $parent
+  }
+}
+
+function Assert-SafeSkillDestinations {
+  param([Parameter(Mandatory)][object[]] $Skills)
+  $roots = @(
+    (Join-Path $HomeDir '.agents\skills'),
+    (Join-Path $ConfigDir 'skills'),
+    (Join-Path $HomeDir '.claude\skills')
+  )
+  foreach ($root in $roots) {
+    Assert-UnlinkedPathComponents $root
+    foreach ($skill in $Skills) {
+      Assert-UnlinkedPathComponents (Join-Path $root $skill)
+      Assert-UnlinkedPathComponents (Join-Path (Join-Path $root $skill) 'SKILL.md')
+    }
+  }
 }
 
 function Assert-RequiredSkills {
@@ -758,10 +848,10 @@ try {
   if ($ActiveRoot) { $HeldLocks.Add((Acquire-UpdateLock $ActiveRoot)) }
 
   $twgPath = Get-FirstApplicationPath 'twg'
+  $twgBootstrapped = $false
   if (-not $twgPath) {
     $fallback = Join-Path $env:LOCALAPPDATA 'Programs\twg\bin\twg.exe'
     if (Test-Path -LiteralPath $fallback -PathType Leaf) { $twgPath = $fallback }
-    else { throw 'TWG CLI was not found. Install TWG, then re-run this installer.' }
   }
   $opencodePath = Get-FirstApplicationPath 'opencode'
   if (-not $opencodePath) { throw 'OpenCode executable was not found on PATH. Install OpenCode, open a new terminal, and re-run.' }
@@ -809,7 +899,24 @@ try {
   }
 
   Assert-OpenCodeCompatibility -OpenCodePath $opencodePath -Manifest $SelectedManifest
+  if (-not $twgPath) {
+    Assert-UnlinkedPathComponents (Join-Path $env:LOCALAPPDATA 'Programs\twg\bin\twg.exe')
+    Install-OfficialTwgCli -Version $SelectedManifest.twgCli.installVersion
+    $twgBootstrapped = $true
+    $twgPath = Join-Path $env:LOCALAPPDATA 'Programs\twg\bin\twg.exe'
+    if (-not (Test-Path -LiteralPath $twgPath -PathType Leaf)) {
+      throw 'The official TWG installer completed without creating the expected executable.'
+    }
+  }
   Assert-CliCompatibility -TwgPath $twgPath -Manifest $SelectedManifest
+  if ($twgBootstrapped) {
+    $installedText = ((@(& $twgPath --version)) -join "`n").Trim()
+    $installedMatch = [regex]::Match($installedText, '(?:^|[^0-9A-Za-z.+-])(\d+\.\d+\.\d+)(?:$|[^0-9A-Za-z.+-])')
+    if (-not $installedMatch.Success -or $installedMatch.Groups[1].Value -ne $SelectedManifest.twgCli.installVersion) {
+      throw "Official installer did not produce pinned TWG CLI $($SelectedManifest.twgCli.installVersion)."
+    }
+  }
+  Assert-SafeSkillDestinations -Skills @($SelectedManifest.requiredSkills)
   if (-not $SkipTwgSkills) {
     Write-Host 'Installing official TWG skills without pruning custom twg-* directories ...'
     Invoke-Checked $twgPath @('skills', 'install', '--yes', '--no-prune')

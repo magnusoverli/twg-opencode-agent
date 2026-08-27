@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync, realpathSync } from "node:fs"
-import { link, lstat, open, readFile, realpath, rename, rm, stat, unlink } from "node:fs/promises"
+import { link, lstat, mkdtemp, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { basename, delimiter, dirname, isAbsolute, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -21,6 +21,7 @@ import {
 import { extractTwgOutputFiles, runProcess, stopActiveProcesses, TwgArtifactStore, type SpawnResult } from "../src/twg-process.ts"
 import {
   buildTwgEnvironment,
+  canRunTwgCommands,
   evaluateRuntimeCompatibility,
   evaluateTwgCliCompatibility,
   parseBooleanSetting,
@@ -29,12 +30,20 @@ import {
   type CompatibilityManifest,
 } from "../src/twg-runtime.ts"
 import { isVersionNewer, latestReleasedChangelog } from "../src/update.ts"
+import {
+  TWG_AGENT_INSTALL_INSTRUCTIONS_URL,
+  createTwgInstallerPlan,
+  downloadOfficialInstaller,
+  twgInstallerEnvironment,
+  twgMaintenanceEnvironment,
+} from "../src/twg-install.ts"
 
 const pexec = promisify(execFile)
 const bundleRoot = realpathSync(join(dirname(fileURLToPath(import.meta.url)), ".."))
 const expectedOriginPath = join(bundleRoot, ".twg-update-origin")
 const bundleHash = createHash("sha256").update(bundleRoot).digest("hex").slice(0, 16)
 const updateLockPath = join(tmpdir(), `twg-agent-update-${bundleHash}.lock`)
+const cliInstallLockPath = join(tmpdir(), `twg-cli-install-${createHash("sha256").update(homedir()).digest("hex").slice(0, 16)}.lock`)
 const artifactRoot = join(tmpdir(), "twg-opencode-agent", `${process.pid}-${randomUUID()}`)
 const twgEnv = buildTwgEnvironment()
 
@@ -66,11 +75,14 @@ async function git(args: string[], timeout = 60_000, signal?: AbortSignal): Prom
   return result.stdout.trim()
 }
 
-function executableCandidates(): string[] {
+export function executableCandidates(
+  platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): string[] {
   const candidates = ["twg"]
-  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
-    candidates.push(join(process.env.LOCALAPPDATA, "Programs", "twg", "bin", "twg.exe"))
-  }
+  if (platform === "win32" && environment.LOCALAPPDATA) candidates.push(join(environment.LOCALAPPDATA, "Programs", "twg", "bin", "twg.exe"))
+  else if (platform !== "win32") candidates.push(join(home, ".local", "bin", "twg"))
   return [...new Set(candidates)]
 }
 
@@ -82,16 +94,25 @@ function assertCredentialFreeOrigin(value: string): void {
   }
 }
 
-async function canonicalExecutablePath(executable: string): Promise<string> {
+function environmentValue(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+  return Object.entries(environment).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1]
+}
+
+export async function canonicalExecutablePath(
+  executable: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  platform = process.platform,
+): Promise<string | undefined> {
   if (isAbsolute(executable) || executable.includes("/") || executable.includes("\\")) return await realpath(executable)
-  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""]
-  for (const directory of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+  const extensions = platform === "win32" ? (environmentValue(environment, "PATHEXT") ?? ".EXE;.CMD;.BAT").split(";") : [""]
+  for (const entry of (environmentValue(environment, "PATH") ?? "").split(delimiter).filter(Boolean)) {
+    const directory = entry.replace(/^"|"$/g, "")
     for (const extension of extensions) {
-      const candidate = join(directory, process.platform === "win32" ? `${executable}${extension.toLowerCase()}` : executable)
+      const candidate = join(directory, platform === "win32" ? `${executable}${extension.toLowerCase()}` : executable)
       if (existsSync(candidate)) return await realpath(candidate)
     }
   }
-  return executable
+  return undefined
 }
 
 function processText(result: SpawnResult, stream: "stdout" | "stderr"): string {
@@ -204,7 +225,7 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     startupError = error instanceof Error ? error.message : String(error)
     manifest = parseCompatibilityManifest({
       schemaVersion: 1,
-      twgCli: { minimum: "1.2.5", maximumTestedExclusive: "1.3.0" },
+      twgCli: { minimum: "1.2.5", maximumTestedExclusive: "1.3.0", installVersion: "1.2.6" },
       helpContractVersions: [1],
       opencode: { minimum: "1.18.23", maximumTestedExclusive: "2.0.0" },
       requiredFiles: ["VERSION"],
@@ -216,31 +237,77 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
   const updateCheck = parseBooleanSetting(process.env.TWG_AGENT_UPDATE_CHECK, true)
   const signedCommits = parseBooleanSetting(process.env.TWG_AGENT_REQUIRE_SIGNED_COMMITS, false)
   const interval = parseIntervalMinutes(process.env.TWG_AGENT_UPDATE_CHECK_INTERVAL_MINUTES)
+  const cliAutoUpdate = parseBooleanSetting(process.env.TWG_AGENT_CLI_AUTO_UPDATE, true)
+  const cliUpdateInterval = parseIntervalMinutes(process.env.TWG_AGENT_CLI_UPDATE_INTERVAL_MINUTES, 360)
   const development = existsSync(join(bundleRoot, ".twg-development"))
   const artifactStore = new TwgArtifactStore()
   const metadataCache = new Map<string, Promise<TwgCommandMetadata>>()
   let executablePromise: Promise<{ executable: string; canonicalPath: string; identity: string; version: string }> | undefined
+  let cliMaintenanceActive = false
+
+  async function acquireCliMaintenanceLock(): Promise<{ handle: Awaited<ReturnType<typeof open>>; token: string }> {
+    const token = randomUUID()
+    try {
+      const handle = await open(cliInstallLockPath, "wx", 0o600)
+      await handle.writeFile(JSON.stringify({ token, pid: process.pid, createdAt: new Date().toISOString() }))
+      return { handle, token }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new Error("Another OpenCode process is installing or updating TWG CLI. Wait for it to finish, then inspect the current state.")
+      }
+      throw error
+    }
+  }
+
+  async function releaseCliMaintenanceLock(lock: { handle: Awaited<ReturnType<typeof open>>; token: string }): Promise<void> {
+    await lock.handle.close().catch(() => undefined)
+    try {
+      const owner = JSON.parse(await readFile(cliInstallLockPath, "utf8")) as { token?: string }
+      if (owner.token === lock.token) await unlink(cliInstallLockPath)
+    } catch {
+      // Never remove a lock that cannot be proven to belong to this operation.
+    }
+  }
+
+  async function verifyExecutable(executable: string): Promise<{
+    executable: string
+    canonicalPath: string
+    identity: string
+    version: string
+  }> {
+    const result = await runProcess(executable, ["--version"], {
+      timeoutMs: 10_000,
+      env: twgEnv,
+      inlineLimit: 64 * 1024,
+      artifactRoot,
+    })
+    const version = processText(result, "stdout") || processText(result, "stderr")
+    if (result.spawnError || result.exitCode !== 0 || !version) {
+      throw new Error(result.spawnError ?? `${executable} --version exited with ${result.exitCode}`)
+    }
+    const canonicalPath = await canonicalExecutablePath(executable)
+    if (!canonicalPath) throw new Error(`${executable} started but its executable path could not be resolved`)
+    const info = await stat(canonicalPath)
+    return { executable: canonicalPath, canonicalPath, identity: `${canonicalPath}:${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}`, version }
+  }
 
   async function resolveExecutable(): Promise<{ executable: string; canonicalPath: string; identity: string; version: string }> {
     if (executablePromise) return await executablePromise
     executablePromise = (async () => {
       const diagnostics: string[] = []
+      let firstVerified: { executable: string; canonicalPath: string; identity: string; version: string } | undefined
       for (const executable of executableCandidates()) {
-        const result = await runProcess(executable, ["--version"], {
-          timeoutMs: 10_000,
-          env: twgEnv,
-          inlineLimit: 64 * 1024,
-          artifactRoot,
-        })
-        const version = processText(result, "stdout") || processText(result, "stderr")
-        if (!result.spawnError && result.exitCode === 0 && version) {
-          const canonicalPath = await canonicalExecutablePath(executable)
-          const info = await stat(canonicalPath)
-          return { executable: canonicalPath, canonicalPath, identity: `${canonicalPath}:${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}`, version }
+        try {
+          const verified = await verifyExecutable(executable)
+          firstVerified ??= verified
+          const compatibility = evaluateTwgCliCompatibility(verified.version, manifest)
+          if (canRunTwgCommands(compatibility)) return verified
+          diagnostics.push(`${executable}: ${compatibility.message}`)
+        } catch (error) {
+          diagnostics.push(`${executable}: ${error instanceof Error ? error.message : String(error)}`)
         }
-        diagnostics.push(`${executable}: ${result.spawnError ?? `exit ${result.exitCode}`}`)
-        if (!result.spawnError?.toLowerCase().includes("enoent")) break
       }
+      if (firstVerified) return firstVerified
       throw new Error(`TWG CLI resolution failed. ${diagnostics.join("; ")}`)
     })()
     try {
@@ -270,7 +337,7 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
   ): Promise<{ metadata: TwgCommandMetadata; identity: string }> {
     const resolved = await currentExecutable()
     const compatibility = evaluateTwgCliCompatibility(resolved.version, manifest)
-    if (compatibility.status !== "compatible") throw new Error(compatibility.message)
+    if (!canRunTwgCommands(compatibility)) throw new Error(compatibility.message)
     const key = `${resolved.identity}\0${resolved.version}\0${command.join("\0")}`
     let pending = metadataCache.get(key)
     if (!pending) {
@@ -375,6 +442,80 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     }
   }
 
+  type CliUpdateState = {
+    checking: boolean
+    lastAttemptAt?: string
+    lastSuccessAt?: string
+    installedVersion?: string
+    updatedFrom?: string
+    restartRequired?: boolean
+    error?: string
+  }
+  const cliUpdateState: CliUpdateState = { checking: false }
+  let currentCliUpdate: Promise<void> | undefined
+  let cliUpdateAbort: AbortController | undefined
+
+  async function runCliAutoUpdate(): Promise<void> {
+    if (!cliAutoUpdate.value || development || startupError || cliMaintenanceActive || cliUpdateState.checking) return
+    cliMaintenanceActive = true
+    let maintenanceLock: Awaited<ReturnType<typeof acquireCliMaintenanceLock>> | undefined
+    cliUpdateState.checking = true
+    cliUpdateState.lastAttemptAt = new Date().toISOString()
+    cliUpdateState.error = undefined
+    cliUpdateAbort = new AbortController()
+    try {
+      maintenanceLock = await acquireCliMaintenanceLock()
+      const before = await currentExecutable()
+      const beforeCompatibility = evaluateTwgCliCompatibility(before.version, manifest)
+      if (!beforeCompatibility.installedVersion) throw new Error("Could not determine the installed TWG CLI version before update.")
+      await assertUnlinkedInstallPaths([before.canonicalPath, ...skillInstallPaths()])
+      const result = await runProcess(before.executable, ["update", "--yes", "--refresh-skills"], {
+        env: twgMaintenanceEnvironment(twgEnv),
+        timeoutMs: 10 * 60_000,
+        signal: cliUpdateAbort.signal,
+        inlineLimit: 256 * 1024,
+        artifactRoot,
+      })
+      if (result.exitCode !== 0 || result.spawnError || result.timedOut || result.aborted) {
+        const detail = processText(result, "stderr") || processText(result, "stdout") || result.spawnError || `exit ${result.exitCode}`
+        throw new Error(detail.slice(0, 4_096))
+      }
+      const after = await verifyExecutable(before.canonicalPath)
+      const afterCompatibility = evaluateTwgCliCompatibility(after.version, manifest)
+      if (!afterCompatibility.installedVersion) throw new Error("Could not determine the TWG CLI version after update.")
+      executablePromise = Promise.resolve(after)
+      metadataCache.clear()
+      const skills = await installedSkillStatus()
+      if (!skills.available) throw new Error("TWG CLI updated, but required OpenCode skills are unavailable after refresh.")
+      cliUpdateState.lastSuccessAt = new Date().toISOString()
+      cliUpdateState.installedVersion = afterCompatibility.installedVersion
+      if (afterCompatibility.installedVersion !== beforeCompatibility.installedVersion) {
+        cliUpdateState.updatedFrom = beforeCompatibility.installedVersion
+        cliUpdateState.restartRequired = true
+        await showUpdateMessage(
+          `TWG CLI ${afterCompatibility.installedVersion} was available and has been installed. Restart OpenCode to load refreshed TWG skills.`,
+        )
+      }
+    } catch (error) {
+      cliUpdateState.error = error instanceof Error ? error.message : String(error)
+      await client.app
+        .log({ body: { service: "twg-cli-auto-update", level: "warn", message: `CLI auto-update skipped: ${cliUpdateState.error}` } })
+        .catch(() => undefined)
+    } finally {
+      cliUpdateState.checking = false
+      cliUpdateAbort = undefined
+      cliMaintenanceActive = false
+      if (maintenanceLock) await releaseCliMaintenanceLock(maintenanceLock)
+    }
+  }
+
+  function startCliAutoUpdate(): void {
+    if (currentCliUpdate) return
+    currentCliUpdate = runCliAutoUpdate().finally(() => {
+      currentCliUpdate = undefined
+    })
+  }
+
   async function acquireUpdateLock(): Promise<{ handle: Awaited<ReturnType<typeof open>>; token: string } | null> {
     try {
       const handle = await open(updateLockPath, "wx")
@@ -461,7 +602,10 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     }
   }
 
-  async function installedSkillStatus(): Promise<unknown> {
+  async function installedSkillStatus(): Promise<{
+    available: boolean
+    skills: Array<{ skill: string; available: boolean; paths: string[]; identities: string[] }>
+  }> {
     const roots = [
       join(homedir(), ".config", "opencode", "skills"),
       join(homedir(), ".agents", "skills"),
@@ -469,14 +613,47 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     ]
     const skills = await Promise.all(manifest.requiredSkills.map(async (skill) => {
       const paths = []
+      const identities = []
       for (const root of roots) {
+        const rootInfo = await lstat(root).catch(() => null)
+        const skillRoot = join(root, skill)
+        const skillRootInfo = await lstat(skillRoot).catch(() => null)
         const path = join(root, skill, "SKILL.md")
         const info = await lstat(path).catch(() => null)
-        if (info?.isFile() && !info.isSymbolicLink()) paths.push(path)
+        if (
+          rootInfo?.isDirectory() && !rootInfo.isSymbolicLink() &&
+          skillRootInfo?.isDirectory() && !skillRootInfo.isSymbolicLink() &&
+          info?.isFile() && !info.isSymbolicLink()
+        ) {
+          paths.push(path)
+          identities.push(`${path}:${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}`)
+        }
       }
-      return { skill, available: paths.length > 0, paths }
+      return { skill, available: paths.length > 0, paths, identities }
     }))
     return { available: skills.every((skill) => skill.available), skills }
+  }
+
+  async function assertUnlinkedInstallPaths(paths: string[]): Promise<void> {
+    for (const path of paths) {
+      let cursor = path
+      while (true) {
+        const info = await lstat(cursor).catch(() => null)
+        if (info?.isSymbolicLink()) throw new Error(`TWG installation path contains a symbolic link: ${cursor}`)
+        const parent = dirname(cursor)
+        if (parent === cursor) break
+        cursor = parent
+      }
+    }
+  }
+
+  function skillInstallPaths(): string[] {
+    const roots = [
+      join(homedir(), ".config", "opencode", "skills"),
+      join(homedir(), ".agents", "skills"),
+      join(homedir(), ".claude", "skills"),
+    ]
+    return roots.flatMap((root) => manifest.requiredSkills.flatMap((skill) => [root, join(root, skill), join(root, skill, "SKILL.md")]))
   }
 
   async function agentStatus(): Promise<unknown> {
@@ -512,13 +689,17 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
       bundleRoot,
       releasedChangelog: latestReleasedChangelog(await readFile(join(bundleRoot, "CHANGELOG.md"), "utf8").catch(() => "")),
       startupError,
-      configurationErrors: [updateCheck.error, signedCommits.error, interval.error].filter(Boolean),
+      configurationErrors: [updateCheck.error, signedCommits.error, interval.error, cliAutoUpdate.error, cliUpdateInterval.error].filter(Boolean),
       updateCheckRequested: updateCheck.value,
       updateCheckEnabled: updateCheck.value && !development && !startupError && existsSync(join(bundleRoot, ".git")),
       updateCheckIntervalMinutes: interval.value,
       development,
       requireSignedCommits: signedCommits.value,
       update: updateState,
+      cliAutoUpdateRequested: cliAutoUpdate.value,
+      cliAutoUpdateEnabled: cliAutoUpdate.value && !development && !startupError,
+      cliUpdateIntervalMinutes: cliUpdateInterval.value,
+      cliUpdate: cliUpdateState,
       compatibility: manifest,
       openCodeCompatibility,
       skills: await installedSkillStatus(),
@@ -535,11 +716,19 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
 
   let initialTimer: NodeJS.Timeout | undefined
   let intervalTimer: NodeJS.Timeout | undefined
+  let cliInitialTimer: NodeJS.Timeout | undefined
+  let cliIntervalTimer: NodeJS.Timeout | undefined
   if (updateCheck.value && !development && !startupError) {
     initialTimer = setTimeout(startUpdateCheck, 1_000)
     initialTimer.unref()
     intervalTimer = setInterval(startUpdateCheck, interval.value * 60_000)
     intervalTimer.unref()
+  }
+  if (cliAutoUpdate.value && !development && !startupError) {
+    cliInitialTimer = setTimeout(startCliAutoUpdate, 5_000)
+    cliInitialTimer.unref()
+    cliIntervalTimer = setInterval(startCliAutoUpdate, cliUpdateInterval.value * 60_000)
+    cliIntervalTimer.unref()
   }
 
   return {
@@ -661,49 +850,241 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
             }
           }
           const approvedLocalPaths = effects.paths.map((path) => path.absolutePath)
-          resolved = await currentExecutable()
-          if (resolved.identity !== described.identity) throw new Error("TWG CLI changed after approval; retry after it stabilizes.")
-          if (effects.local !== "none") {
-            await canonicalizeLocalEffects(effects)
-            if (effects.paths.some((path, index) => path.absolutePath !== approvedLocalPaths[index])) {
-              throw new Error("An approved local path changed before execution; refusing to run the command.")
+          const executionLock = await acquireCliMaintenanceLock()
+          try {
+            resolved = await currentExecutable()
+            if (resolved.identity !== described.identity) throw new Error("TWG CLI changed after approval; retry after it stabilizes.")
+            if (effects.local !== "none") {
+              await canonicalizeLocalEffects(effects)
+              if (effects.paths.some((path, index) => path.absolutePath !== approvedLocalPaths[index])) {
+                throw new Error("An approved local path changed before execution; refusing to run the command.")
+              }
+            }
+            const result = await runProcess(resolved.executable, [...input.command, ...executionArguments], {
+              cwd: context.directory,
+              env: twgEnv,
+              timeoutMs: input.timeoutMs ?? defaultTimeout(input.command, input.arguments),
+              signal: context.abort,
+              inlineLimit: 64 * 1024,
+              artifactRoot,
+            })
+            const artifacts = await registerArtifacts(context, result)
+            const compact = artifacts.find((artifact) => artifact.kind === "compact" && artifact.bytes <= 32 * 1024)
+            const compactInline = compact ? await artifactStore.read(context.sessionID, compact.id, 32 * 1024) : undefined
+            const status = executionStatus(result, effects)
+            return {
+              title: `${metadata.cmd}: ${status.status}`,
+              output: JSON.stringify({
+                ok: status.status === "success",
+                ...status,
+                command: metadata.cmd,
+                tier: metadata.tier,
+                effects,
+                process: {
+                  exitCode: result.exitCode,
+                  signal: result.signal,
+                  timedOut: result.timedOut,
+                  aborted: result.aborted,
+                  durationMs: result.durationMs,
+                  stdoutBytes: result.stdout.bytes,
+                  stderrBytes: result.stderr.bytes,
+                },
+                stdoutInline: result.stdout.text?.trim(),
+                stderrInline: result.stderr.text?.trim(),
+                compactInline: compactInline?.data,
+                artifacts: artifacts.map(({ id, kind, bytes, filename }) => ({ id, kind, bytes, filename })),
+              }),
+              metadata: { command: metadata.cmd, status: status.status, tier: metadata.tier, artifacts: artifacts.length },
+            }
+          } finally {
+            await releaseCliMaintenanceLock(executionLock)
+          }
+        },
+      } satisfies ToolDefinition,
+      twg_cli_install: {
+        description: "Install a missing compatible TWG CLI and official OpenCode skills from Atlassian's fixed public installer without performing login or handling credentials.",
+        args: {},
+        async execute(_input: Record<string, never>, context: ToolContext) {
+          if (cliMaintenanceActive) throw new Error("A TWG CLI installation or update is already running in this OpenCode session.")
+          cliMaintenanceActive = true
+          let maintenanceLock: Awaited<ReturnType<typeof acquireCliMaintenanceLock>>
+          try {
+            maintenanceLock = await acquireCliMaintenanceLock()
+          } catch (error) {
+            cliMaintenanceActive = false
+            throw error
+          }
+          try {
+          if (startupError) throw new Error(`TWG agent bundle startup failed: ${startupError}`)
+
+          async function inspectCli() {
+            try {
+              const resolved = await currentExecutable()
+              return { resolved, compatibility: evaluateTwgCliCompatibility(resolved.version, manifest) }
+            } catch (error) {
+              return { error: error instanceof Error ? error.message : String(error) }
             }
           }
-          const result = await runProcess(resolved.executable, [...input.command, ...executionArguments], {
-            cwd: context.directory,
-            env: twgEnv,
-            timeoutMs: input.timeoutMs ?? defaultTimeout(input.command, input.arguments),
-            signal: context.abort,
-            inlineLimit: 64 * 1024,
-            artifactRoot,
+
+          let inspection = await inspectCli()
+          await assertUnlinkedInstallPaths(skillInstallPaths())
+          let skillStatus = await installedSkillStatus()
+          if (inspection.compatibility && canRunTwgCommands(inspection.compatibility) && skillStatus.available) {
+            return JSON.stringify({
+              status: "already_ready",
+              executable: inspection.resolved?.executable,
+              version: inspection.compatibility.installedVersion,
+              skills: skillStatus,
+            })
+          }
+          const approvedSnapshot = JSON.stringify({
+            identity: inspection.resolved?.identity,
+            status: inspection.compatibility?.status ?? "missing",
+            skills: skillStatus.skills,
           })
-          const artifacts = await registerArtifacts(context, result)
-          const compact = artifacts.find((artifact) => artifact.kind === "compact" && artifact.bytes <= 32 * 1024)
-          const compactInline = compact ? await artifactStore.read(context.sessionID, compact.id, 32 * 1024) : undefined
-          const status = executionStatus(result, effects)
-          return {
-            title: `${metadata.cmd}: ${status.status}`,
-            output: JSON.stringify({
-              ok: status.status === "success",
-              ...status,
-              command: metadata.cmd,
-              tier: metadata.tier,
-              effects,
-              process: {
-                exitCode: result.exitCode,
-                signal: result.signal,
-                timedOut: result.timedOut,
-                aborted: result.aborted,
-                durationMs: result.durationMs,
-                stdoutBytes: result.stdout.bytes,
-                stderrBytes: result.stderr.bytes,
+
+          const approvalPlan = createTwgInstallerPlan(manifest.twgCli.installVersion, join(tmpdir(), "twg-official-installer"))
+          const installBinary = !inspection.compatibility || !canRunTwgCommands(inspection.compatibility)
+          if (installBinary) await assertUnlinkedInstallPaths([approvalPlan.executablePath])
+          const approvedPlan = JSON.stringify({
+            installerUrl: approvalPlan.installerUrl,
+            executablePath: approvalPlan.executablePath,
+            runner: approvalPlan.runner,
+            kind: approvalPlan.kind,
+          })
+          await context.ask({
+            permission: "twg_installation",
+            patterns: [
+              installBinary
+                ? `Install TWG CLI ${manifest.twgCli.installVersion} to ${approvalPlan.executablePath} and install official OpenCode skills`
+                : `Install official TWG OpenCode skills using ${inspection.resolved?.executable}`,
+            ],
+            always: [],
+            metadata: {
+              installBinary,
+              version: manifest.twgCli.installVersion,
+              installerUrl: approvalPlan.installerUrl,
+              instructionsUrl: TWG_AGENT_INSTALL_INSTRUCTIONS_URL,
+              executablePath: approvalPlan.executablePath,
+              localPaths: [approvalPlan.executablePath, ...skillInstallPaths()],
+              authentication: "skipped",
+              skills: manifest.requiredSkills,
+            },
+          })
+
+          inspection = await inspectCli()
+          skillStatus = await installedSkillStatus()
+          const currentSnapshot = JSON.stringify({
+            identity: inspection.resolved?.identity,
+            status: inspection.compatibility?.status ?? "missing",
+            skills: skillStatus.skills,
+          })
+          if (currentSnapshot !== approvedSnapshot) {
+            throw new Error("TWG CLI or skill state changed during installation approval; inspect the new state and retry.")
+          }
+
+          const requireSuccess = (result: SpawnResult, label: string): void => {
+            if (result.exitCode === 0 && !result.spawnError && !result.timedOut && !result.aborted) return
+            const detail = processText(result, "stderr") || processText(result, "stdout") || result.spawnError || `exit ${result.exitCode}`
+            throw new Error(`${label} failed: ${detail.slice(0, 4_096)}`)
+          }
+
+          let resolved = inspection.resolved
+          let installedBinary = false
+          if (!inspection.compatibility || !canRunTwgCommands(inspection.compatibility)) {
+            const installRoot = await mkdtemp(join(tmpdir(), "twg-cli-install-"))
+            const installerPath = join(installRoot, process.platform === "win32" ? "install.ps1" : "install.sh")
+            const plan = createTwgInstallerPlan(manifest.twgCli.installVersion, installerPath)
+            if (JSON.stringify({
+              installerUrl: plan.installerUrl,
+              executablePath: plan.executablePath,
+              runner: plan.runner,
+              kind: plan.kind,
+            }) !== approvedPlan) {
+              throw new Error("The TWG installer plan changed after approval; refusing to continue.")
+            }
+            const installEnvironment = twgInstallerEnvironment(twgEnv, manifest.twgCli.installVersion)
+            try {
+              const content = await downloadOfficialInstaller(plan, context.abort)
+              await writeFile(installerPath, content, { flag: "wx", mode: 0o600 })
+              const beforeSpawn = await inspectCli()
+              const beforeSpawnSkills = await installedSkillStatus()
+              await assertUnlinkedInstallPaths([plan.executablePath, ...skillInstallPaths()])
+              if (JSON.stringify({
+                identity: beforeSpawn.resolved?.identity,
+                status: beforeSpawn.compatibility?.status ?? "missing",
+                skills: beforeSpawnSkills.skills,
+              }) !== approvedSnapshot) {
+                throw new Error("TWG CLI or skill state changed before installer execution; refusing to continue.")
+              }
+              if (plan.syntaxCheck) {
+                const syntaxResult = await runProcess(plan.syntaxCheck.runner, plan.syntaxCheck.arguments, {
+                  env: installEnvironment,
+                  timeoutMs: 30_000,
+                  signal: context.abort,
+                  inlineLimit: 64 * 1024,
+                  artifactRoot,
+                })
+                requireSuccess(syntaxResult, "Official TWG installer syntax validation")
+              }
+              const installResult = await runProcess(plan.runner, plan.arguments, {
+                env: installEnvironment,
+                timeoutMs: 10 * 60_000,
+                signal: context.abort,
+                inlineLimit: 256 * 1024,
+                artifactRoot,
+              })
+              requireSuccess(installResult, "Official TWG CLI installer")
+            } finally {
+              await rm(installRoot, { recursive: true, force: true })
+            }
+            executablePromise = undefined
+            metadataCache.clear()
+            resolved = await verifyExecutable(plan.executablePath)
+            const compatibility = evaluateTwgCliCompatibility(resolved.version, manifest)
+            if (compatibility.status !== "compatible") throw new Error(`Installed CLI verification failed: ${compatibility.message}`)
+            if (compatibility.installedVersion !== manifest.twgCli.installVersion) {
+              throw new Error(`Official installer produced TWG CLI ${compatibility.installedVersion ?? "unknown"}; expected ${manifest.twgCli.installVersion}.`)
+            }
+            executablePromise = Promise.resolve(resolved)
+            installedBinary = true
+          }
+
+          skillStatus = await installedSkillStatus()
+          if (!skillStatus.available) {
+            if (!resolved) throw new Error("TWG CLI was not available after installation.")
+            await assertUnlinkedInstallPaths(skillInstallPaths())
+            const skillResult = await runProcess(
+              resolved.executable,
+              ["skills", "install", "--agent", "opencode", "--yes", "--no-prune"],
+              {
+                cwd: context.directory,
+                env: twgInstallerEnvironment(twgEnv, manifest.twgCli.installVersion),
+                timeoutMs: 5 * 60_000,
+                signal: context.abort,
+                inlineLimit: 256 * 1024,
+                artifactRoot,
               },
-              stdoutInline: result.stdout.text?.trim(),
-              stderrInline: result.stderr.text?.trim(),
-              compactInline: compactInline?.data,
-              artifacts: artifacts.map(({ id, kind, bytes, filename }) => ({ id, kind, bytes, filename })),
-            }),
-            metadata: { command: metadata.cmd, status: status.status, tier: metadata.tier, artifacts: artifacts.length },
+            )
+            requireSuccess(skillResult, "Official TWG OpenCode skill installation")
+            skillStatus = await installedSkillStatus()
+            if (!skillStatus.available) throw new Error("TWG CLI completed skill installation, but required OpenCode skills are still unavailable.")
+          }
+
+          const verified = await currentExecutable()
+          return JSON.stringify({
+            status: "installed",
+            installedBinary,
+            executable: verified.executable,
+            version: evaluateTwgCliCompatibility(verified.version, manifest).installedVersion,
+            compatibility: evaluateTwgCliCompatibility(verified.version, manifest),
+            skills: skillStatus,
+            authentication: "not_performed",
+            nextStep: "Run `twg login` in a terminal if authentication is not already configured, then run `twg doctor`.",
+          })
+          } finally {
+            cliMaintenanceActive = false
+            await releaseCliMaintenanceLock(maintenanceLock)
           }
         },
       } satisfies ToolDefinition,
@@ -729,9 +1110,12 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     dispose: async () => {
       if (initialTimer) clearTimeout(initialTimer)
       if (intervalTimer) clearInterval(intervalTimer)
+      if (cliInitialTimer) clearTimeout(cliInitialTimer)
+      if (cliIntervalTimer) clearInterval(cliIntervalTimer)
       updateAbort?.abort()
-      await currentUpdate?.catch(() => undefined)
+      cliUpdateAbort?.abort()
       await stopActiveProcesses()
+      await Promise.allSettled([currentUpdate, currentCliUpdate].filter((value): value is Promise<void> => Boolean(value)))
       await artifactStore.dispose()
       await rm(artifactRoot, { recursive: true, force: true })
     },
