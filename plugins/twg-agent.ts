@@ -431,13 +431,15 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     error?: string
     availableVersion?: string
     availableRef?: string
+    updatedFrom?: string
+    installedVersion?: string
+    restartRequired?: boolean
   }
   const updateState: UpdateState = { checking: false }
-  let lastNotifiedVersion: string | null = null
 
-  async function showUpdateMessage(message: string): Promise<void> {
+  async function showUpdateMessage(message: string, duration = 20_000): Promise<void> {
     try {
-      await client.tui.showToast({ body: { title: "TWG Agent", message, variant: "info", duration: 20_000 } })
+      await client.tui.showToast({ body: { title: "TWG Agent", message, variant: "info", duration } })
     } catch {
       await client.app.log({ body: { service: "twg-agent-update-check", level: "warn", message } }).catch(() => undefined)
     }
@@ -532,8 +534,39 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
   let updateAbort: AbortController | undefined
   let currentUpdate: Promise<void> | undefined
 
+  async function runBundleAutoUpdate(targetVersion: string, origin: string, signal: AbortSignal): Promise<void> {
+    const installer = process.platform === "win32"
+      ? {
+          executable: "powershell.exe",
+          arguments: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(bundleRoot, "install.ps1"), "-RepoUrl", origin],
+        }
+      : {
+          executable: "/bin/bash",
+          arguments: [join(bundleRoot, "install.sh"), "--repo-url", origin],
+        }
+    const result = await runProcess(installer.executable, installer.arguments, {
+      cwd: bundleRoot,
+      env: process.env,
+      timeoutMs: 15 * 60_000,
+      signal,
+      inlineLimit: 256 * 1024,
+      artifactRoot,
+    })
+    if (result.exitCode !== 0 || result.spawnError || result.timedOut || result.aborted) {
+      const detail = processText(result, "stderr") || processText(result, "stdout") || result.spawnError || `exit ${result.exitCode}`
+      throw new Error(`Bundle installer failed: ${detail.slice(0, 4_096)}`)
+    }
+    updateState.updatedFrom = runningVersion
+    updateState.installedVersion = targetVersion
+    updateState.restartRequired = true
+    updateState.availableVersion = undefined
+    updateState.availableRef = undefined
+    updateState.lastSuccessAt = new Date().toISOString()
+    await showUpdateMessage(`TWG agent ${targetVersion} has been installed. Restart OpenCode to use it.`, 5_000)
+  }
+
   async function runUpdateCheck(): Promise<void> {
-    if (!updateCheck.value || development || startupError || !existsSync(join(bundleRoot, ".git")) || updateState.checking) return
+    if (!updateCheck.value || development || startupError || updateState.restartRequired || !existsSync(join(bundleRoot, ".git")) || updateState.checking) return
     const lock = await acquireUpdateLock().catch(() => null)
     if (!lock) return
     updateAbort = new AbortController()
@@ -542,43 +575,57 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     updateState.lastAttemptAt = new Date().toISOString()
     updateState.error = undefined
     try {
-      await lock.handle.writeFile(JSON.stringify({ token: lock.token, pid: process.pid, updatedAt: updateState.lastAttemptAt }))
-      const topLevel = await realpath(await git(["rev-parse", "--show-toplevel"], 60_000, signal))
-      if (topLevel !== (await realpath(bundleRoot))) throw new Error("Git top-level does not match the installed bundle root")
-      const before = await git(["rev-parse", "HEAD"], 60_000, signal)
-      const beforeVersion = (await git(["show", `${before}:VERSION`], 60_000, signal)).trim()
-      const expectedOrigin = (await readFile(expectedOriginPath, "utf8")).trim()
-      const actualOrigin = await git(["remote", "get-url", "origin"], 60_000, signal)
-      assertCredentialFreeOrigin(expectedOrigin)
-      assertCredentialFreeOrigin(actualOrigin)
-      const upstream = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], 60_000, signal)
-      if (!expectedOrigin || expectedOrigin !== actualOrigin || !upstream.startsWith("origin/")) {
-        updateState.blocked = "configured Git origin or upstream does not match the installer-pinned origin"
-        return
-      }
-      await git(["fetch", "--quiet"], 60_000, signal)
-      const target = await git(["rev-parse", "@{u}"], 60_000, signal)
-      if (before === target) {
+      let pendingUpdate: { version: string; origin: string } | undefined
+      try {
+        await lock.handle.writeFile(JSON.stringify({ token: lock.token, pid: process.pid, updatedAt: updateState.lastAttemptAt }))
+        const topLevel = await realpath(await git(["rev-parse", "--show-toplevel"], 60_000, signal))
+        if (topLevel !== (await realpath(bundleRoot))) throw new Error("Git top-level does not match the installed bundle root")
+        const before = await git(["rev-parse", "HEAD"], 60_000, signal)
+        const beforeVersion = (await git(["show", `${before}:VERSION`], 60_000, signal)).trim()
+        const expectedOrigin = (await readFile(expectedOriginPath, "utf8")).trim()
+        const actualOrigin = await git(["remote", "get-url", "origin"], 60_000, signal)
+        assertCredentialFreeOrigin(expectedOrigin)
+        assertCredentialFreeOrigin(actualOrigin)
+        const upstream = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], 60_000, signal)
+        if (!expectedOrigin || expectedOrigin !== actualOrigin || !upstream.startsWith("origin/")) {
+          updateState.blocked = "configured Git origin or upstream does not match the installer-pinned origin"
+          return
+        }
+        await git(["fetch", "--quiet"], 60_000, signal)
+        const target = await git(["rev-parse", "@{u}"], 60_000, signal)
+        if (before === target) {
+          updateState.blocked = undefined
+          updateState.availableVersion = undefined
+          updateState.availableRef = undefined
+          updateState.lastSuccessAt = new Date().toISOString()
+          return
+        }
+        const targetVersion = (await git(["show", `${target}:VERSION`], 60_000, signal)).trim()
+        if (!isVersionNewer(beforeVersion, targetVersion)) {
+          updateState.blocked = `remote commit ${target.slice(0, 7)} does not advance VERSION beyond ${beforeVersion}`
+          return
+        }
+        if (signedCommits.value) await git(["verify-commit", target], 60_000, signal)
+        updateState.availableVersion = targetVersion
+        updateState.availableRef = target
         updateState.blocked = undefined
-        updateState.availableVersion = undefined
-        updateState.availableRef = undefined
-        updateState.lastSuccessAt = new Date().toISOString()
-        return
+        pendingUpdate = { version: targetVersion, origin: expectedOrigin }
+      } finally {
+        await lock.handle.close().catch(() => undefined)
+        const quarantine = `${updateLockPath}.release-${process.pid}-${lock.token}`
+        try {
+          await rename(updateLockPath, quarantine)
+          const owner = JSON.parse(await readFile(quarantine, "utf8")) as { token?: string }
+          if (owner.token === lock.token) await unlink(quarantine)
+          else {
+            await link(quarantine, updateLockPath).catch(() => undefined)
+            await unlink(quarantine).catch(() => undefined)
+          }
+        } catch {
+          // A missing or replaced lock is never removed by token guesswork.
+        }
       }
-      const targetVersion = (await git(["show", `${target}:VERSION`], 60_000, signal)).trim()
-      if (!isVersionNewer(beforeVersion, targetVersion)) {
-        updateState.blocked = `remote commit ${target.slice(0, 7)} does not advance VERSION beyond ${beforeVersion}`
-        return
-      }
-      if (signedCommits.value) await git(["verify-commit", target], 60_000, signal)
-      updateState.availableVersion = targetVersion
-      updateState.availableRef = target
-      updateState.blocked = undefined
-      updateState.lastSuccessAt = new Date().toISOString()
-      if (lastNotifiedVersion !== targetVersion) {
-        lastNotifiedVersion = targetVersion
-        await showUpdateMessage(`TWG agent ${targetVersion} is available. Re-run the installer to stage and activate it safely.`)
-      }
+      if (pendingUpdate) await runBundleAutoUpdate(pendingUpdate.version, pendingUpdate.origin, signal)
     } catch (error) {
       updateState.error = error instanceof Error ? error.message : String(error)
       await client.app
@@ -587,19 +634,6 @@ export const TwgAgentPlugin: Plugin = async ({ client }) => {
     } finally {
       updateState.checking = false
       updateAbort = undefined
-      await lock.handle.close().catch(() => undefined)
-      const quarantine = `${updateLockPath}.release-${process.pid}-${lock.token}`
-      try {
-        await rename(updateLockPath, quarantine)
-        const owner = JSON.parse(await readFile(quarantine, "utf8")) as { token?: string }
-        if (owner.token === lock.token) await unlink(quarantine)
-        else {
-          await link(quarantine, updateLockPath).catch(() => undefined)
-          await unlink(quarantine).catch(() => undefined)
-        }
-      } catch {
-        // A missing or replaced lock is never removed by token guesswork.
-      }
     }
   }
 

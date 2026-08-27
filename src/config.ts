@@ -45,7 +45,7 @@ export function registerTwgConfig(
       "If `bundleUpdatePending` is present, say that restarting OpenCode loads the on-disk bundle.",
       "If `cliUpdate.restartRequired` is true, say that restarting OpenCode loads the refreshed TWG skills.",
       "Report `cliUpdate.error` only when present.",
-      "If `update.availableVersion` is present, say that the installer must be rerun to install it.",
+      "If `update.restartRequired` is true, say that restarting OpenCode loads the automatically installed TWG agent bundle.",
       "Point to `/twg-changelog` for release notes. Keep the answer to 1-3 short lines.",
     ].join("\n"),
   }

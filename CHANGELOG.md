@@ -7,6 +7,7 @@ All user-visible changes to the TWG OpenCode agent are recorded here. The bundle
 
 ### Changed
 
+- Detected trusted TWG agent bundle updates now install automatically and show a five-second restart notification.
 - TWG CLI now updates automatically through its own updater, refreshes official skills, accepts newer releases through live command contracts, and notifies users to restart OpenCode after a version change.
 - TWG tool guidance now explicitly separates the command path from arguments and requires live contracts for unfamiliar grammar.
 - First-time bundle installs and explicitly approved runtime repairs can now bootstrap a pinned compatible TWG CLI and official OpenCode skills from Atlassian without handling authentication.

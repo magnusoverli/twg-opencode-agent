@@ -6,11 +6,15 @@ const plugin = await readFile(new URL("../plugins/twg-agent.ts", import.meta.url
 const powershellInstaller = await readFile(new URL("../install.ps1", import.meta.url), "utf8")
 const posixInstaller = await readFile(new URL("../install.sh", import.meta.url), "utf8")
 
-test("runtime update checks fetch without changing tracked checkout files", () => {
+test("runtime update checks hand trusted newer bundles to the staged installer", () => {
   const updateCheck = plugin.slice(plugin.indexOf("async function runUpdateCheck"), plugin.indexOf("async function installedSkillStatus"))
   assert.match(updateCheck, /\["fetch", "--quiet"\]/)
   assert.doesNotMatch(updateCheck, /\["(?:checkout|clean|merge|pull|rebase|reset|restore|switch)"/)
+  assert.match(updateCheck, /updateState\.restartRequired/)
+  assert.match(updateCheck, /runBundleAutoUpdate\(pendingUpdate\.version, pendingUpdate\.origin, signal\)/)
   assert.match(plugin, /never removes an existing lock/)
+  assert.match(plugin, /, 5_000\)/)
+  assert.match(plugin, /Restart OpenCode to use it\./)
 })
 
 test("CLI auto-update uses the fixed self-updater and requests restart only after a version change", () => {

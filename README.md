@@ -187,12 +187,9 @@ CLI update settings:
 - `TWG_AGENT_CLI_UPDATE_INTERVAL_MINUTES=<n>` changes the interval; minimum 1 minute.
 
 On startup and every 15 minutes, the plugin performs a locked, non-blocking check of its tracked
-branch. It may fetch Git metadata, but it never changes tracked runtime files or activates an update.
-When a newer version is available, OpenCode displays a notification.
-
-To install an available update, rerun the same installer command from **Quick start**, then restart
-OpenCode. The installer validates, stages, smoke-tests, and atomically activates the new version while
-preserving the prior active version on failure.
+branch. When a newer trusted version is available, it runs the installer to validate, stage,
+smoke-test, and atomically activate the new version while preserving the prior active version on
+failure. OpenCode then displays a five-second notification to restart and load the new bundle.
 
 Agent bundle update-check settings:
 
